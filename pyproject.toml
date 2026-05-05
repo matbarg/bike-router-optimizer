@@ -2,5 +2,8 @@
 name = "bike-router-optimizer"
 version = "0.1.0"
 dependencies = [
-    "numpy"
+    "numpy",
+    "requests",
+    "folium",
+    "gpxpy"
 ]
