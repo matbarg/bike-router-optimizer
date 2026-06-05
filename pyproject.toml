@@ -5,5 +5,9 @@ dependencies = [
     "numpy",
     "requests",
     "folium",
-    "gpxpy"
+    "gpxpy",
+    "jupyterlab",
+    "pandas",
+    "matplotlib",
+    "seaborn"
 ]
