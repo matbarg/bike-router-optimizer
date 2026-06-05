@@ -1,6 +1,11 @@
-from routemap import RouteMap
 import random
+from turtledemo.penrose import star
+
 import requests
+import gpxpy
+from gpxpy.gpx import GPXTrackPoint
+
+from routemap import RouteMap
 from shapely.measurement import frechet_distance
 from shapely import LineString
 
@@ -72,14 +77,20 @@ class RandomSearch:
     def __init__(self):
         self.map = RouteMap()
 
-    def compute_loss(self, theta, dataset):
+    def compute_loss(self, theta, dataset, show_route=False):
         total = 0.0
 
         for (start, end, preferred_route) in dataset:
             try:
                 predicted_route, geojson = get_route(start, end, theta)
-                # self.map.add_geojson(geojson)
+
+                if show_route:
+                    self.map.add_geojson(geojson)
+
+                print("Predicted route:", len(predicted_route))
+                print("Preferred route:", len(preferred_route))
                 dist = frechet_distance(LineString(predicted_route), LineString(preferred_route))
+                print(f"Frechet distance: {dist:.6f}")
                 total += dist
             except Exception as e:
                 print("Routing failed:", e)
@@ -92,10 +103,13 @@ class RandomSearch:
         best_loss = float("inf")
 
         for i in range(iterations):
+            show_route = i % 25 == 0
+
             theta = sample_theta()
-            loss = self.compute_loss(theta, dataset)
+            loss = self.compute_loss(theta, dataset, show_route)
 
             print(f"Iter {i}: loss={loss:.6f}, theta={theta}")
+
 
             if loss < best_loss:
                 best_loss = loss
@@ -105,7 +119,7 @@ class RandomSearch:
         return best_theta, best_loss
 
 
-def run_rs():
+def run_rs_with_generated_routes():
     rs = RandomSearch()
 
     target_params = route_params(
@@ -121,7 +135,7 @@ def run_rs():
         ((48.18051, 16.33375), (48.21890, 16.38062)),
         ((48.24354, 16.33221), (48.23199, 16.37392)),
         ((48.19768, 16.39778), (48.18566, 16.35358)),
-        #((48.18051, 16.33375), (48.23336, 16.37512))
+        # ((48.18051, 16.33375), (48.23336, 16.37512))
     ]
 
     dataset = []
@@ -138,6 +152,37 @@ def run_rs():
     print("Best loss:", best_loss)
 
     for (start, end) in route_endpoints:
+        route, geojson = get_route(start, end, best_theta)
+        rs.map.add_geojson(geojson, "orange", weight=4)
+
+    rs.map.save()
+
+
+def get_data_from_gpx():
+    with open("./resources/gpx-routes/2025-04-22_2181780448.gpx", "r") as f:
+        gpx = gpxpy.parse(f)
+
+    points = [(p.latitude, p.longitude) for p in gpx.tracks[0].segments[0].points]
+    start = points[0]
+    end = points[-1]
+
+    return start, end, points
+
+
+def run_rs_with_real_routes():
+    rs = RandomSearch()
+
+    dataset = [get_data_from_gpx()]
+
+    for (start, end, points) in dataset:
+        rs.map.add_point_list(points, "green", weight=8)
+
+    best_theta, best_loss = rs.random_search(dataset, iterations=50)
+
+    print("Best parameters:", best_theta)
+    print("Best loss:", best_loss)
+
+    for (start, end, points) in dataset:
         route, geojson = get_route(start, end, best_theta)
         rs.map.add_geojson(geojson, "orange", weight=4)
 
@@ -171,4 +216,5 @@ def test_route():
 
 if __name__ == "__main__":
     # test_route()
-    run_rs()
+    # run_rs_with_generated_routes()
+    run_rs_with_real_routes()
