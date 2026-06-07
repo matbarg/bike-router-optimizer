@@ -9,5 +9,8 @@ dependencies = [
     "jupyterlab",
     "pandas",
     "matplotlib",
-    "seaborn"
+    "seaborn",
+    "geopandas",
+    "geopy",
+    "shapely"
 ]
