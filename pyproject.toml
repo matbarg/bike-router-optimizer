@@ -12,5 +12,6 @@ dependencies = [
     "seaborn",
     "geopandas",
     "geopy",
-    "shapely"
+    "shapely",
+    "scikit-learn"
 ]
