@@ -19,7 +19,7 @@
 
 # %%
 import random
-
+import numpy as np
 import folium
 import geopandas as gpd
 import matplotlib.pyplot as plt
@@ -38,7 +38,7 @@ from sklearn.preprocessing import StandardScaler
 #
 
 # %%
-OD_PAIRS_COUNT = 50
+OD_PAIRS_COUNT = 20
 ROUTES_PER_OD = 200
 
 THETA_MIN = 0.2
@@ -445,6 +445,9 @@ print(f"L1 feature distance: {example_feature_distance:.4f}")
 # %% [markdown]
 # # 9. Experiment Execution
 #
+# This section generates the route dataset used in the results chapter.
+# For each OD pair, one baseline route is generated with BASE_THETA and
+# additional routes are generated with randomly sampled parameter vectors.
 
 # %%
 def run_od_experiment(origin, destination, theta):
@@ -455,10 +458,50 @@ def run_od_experiment(origin, destination, theta):
     return candidate_route, candidate_features
 
 
+def route_metadata(route):
+    """Extract route-level metadata from a GraphHopper route response.
+
+    Note:
+    route_time_min is assumed to already be returned in minutes.
+    """
+    properties = route["properties"]
+
+    return {
+        "route_length_m": properties.get("distance"),
+        "route_time_min": properties.get("time"),
+        "route_ascend_m": properties.get("ascend"),
+        "route_descend_m": properties.get("descend"),
+    }
+
+
+def make_experiment_row(
+    od_id,
+    sample_id,
+    theta,
+    route,
+    features,
+    feature_distance,
+    is_baseline,
+):
+    """Create one results row from route metadata, parameters, and features."""
+    row = {
+        "od_id": od_id,
+        "sample_id": sample_id,
+        "is_baseline": is_baseline,
+        **route_metadata(route),
+        **theta,
+        "feature_distance": feature_distance,
+    }
+
+    for feature_name, feature_value in features.items():
+        row[feature_name] = feature_value
+
+    return row
+
 
 # %%
 experiment_rows = []
-all_routes = []
+route_records = []
 base_feature_vectors = {}
 
 for od_id, (origin_point, destination_point) in enumerate(od_pairs):
@@ -474,20 +517,23 @@ for od_id, (origin_point, destination_point) in enumerate(od_pairs):
         base_features = extract_feature_vector(base_route)
         base_feature_vectors[od_id] = base_features
 
-        base_row = {
-            "od_id": od_id,
-            "sample_id": -1,
-            "route_length_m": base_route["properties"]["distance"],
-            "route_time_min": base_route["properties"]["time"],
-            **BASE_THETA,
-            "feature_distance": 0.0,
-        }
-
-        for feature_name, feature_share in base_features.items():
-            base_row[feature_name] = feature_share
+        base_row = make_experiment_row(
+            od_id=od_id,
+            sample_id=-1,
+            theta=BASE_THETA,
+            route=base_route,
+            features=base_features,
+            feature_distance=0.0,
+            is_baseline=True,
+        )
 
         experiment_rows.append(base_row)
-        all_routes.append(base_route)
+        route_records.append({
+            "od_id": od_id,
+            "sample_id": -1,
+            "is_baseline": True,
+            "route": base_route,
+        })
 
         for sample_id in range(ROUTES_PER_OD):
             random_theta = sample_theta()
@@ -503,35 +549,56 @@ for od_id, (origin_point, destination_point) in enumerate(od_pairs):
                 candidate_features,
             )
 
-            experiment_row = {
-                "od_id": od_id,
-                "sample_id": sample_id,
-                "route_length_m": candidate_route["properties"]["distance"],
-                "route_time_min": candidate_route["properties"]["time"],
-                **random_theta,
-                "feature_distance": feature_distance,
-            }
-
-            for feature_name, feature_share in candidate_features.items():
-                experiment_row[feature_name] = feature_share
+            experiment_row = make_experiment_row(
+                od_id=od_id,
+                sample_id=sample_id,
+                theta=random_theta,
+                route=candidate_route,
+                features=candidate_features,
+                feature_distance=feature_distance,
+                is_baseline=False,
+            )
 
             experiment_rows.append(experiment_row)
-            all_routes.append(candidate_route)
+            route_records.append({
+                "od_id": od_id,
+                "sample_id": sample_id,
+                "is_baseline": False,
+                "route": candidate_route,
+            })
 
     except Exception as error:
         print(f"failed OD {od_id}: {error}")
 
+
 # %% [markdown]
 # # 10. Results Dataset
 #
+# This section constructs the main results dataframe and defines reusable
+# column groups for the following analysis.
 
 # %%
 results_df = pd.DataFrame(experiment_rows)
+route_records_df = pd.DataFrame(route_records)
+
+PARAMETER_COLUMNS = list(BASE_THETA.keys())
+
+METADATA_COLUMNS = [
+    "od_id",
+    "sample_id",
+    "is_baseline",
+    "route_length_m",
+    "route_time_min",
+    "route_ascend_m",
+    "route_descend_m",
+    "feature_distance",
+]
 
 FEATURE_COLUMNS = [
     column
     for column in results_df.columns
-    if ":" in column
+    if column not in METADATA_COLUMNS
+    and column not in PARAMETER_COLUMNS
 ]
 
 results_df[FEATURE_COLUMNS] = (
@@ -543,376 +610,208 @@ results_df.head()
 
 
 # %%
-results_df["feature_distance"].describe()
+dataset_overview = pd.Series({
+    "od_pairs": results_df["od_id"].nunique(),
+    "routes_total": len(results_df),
+    "baseline_routes": results_df["is_baseline"].sum(),
+    "sampled_routes": (~results_df["is_baseline"]).sum(),
+    "features": len(FEATURE_COLUMNS),
+    "parameters": len(PARAMETER_COLUMNS),
+})
+
+dataset_overview
 
 
 # %%
-results_df.groupby("od_id").mean(numeric_only=True)
+# todo this is useless
 
+route_length_time_summary = results_df[
+    [
+        "route_length_m",
+        "route_time_min",
+        "route_ascend_m",
+        "route_descend_m",
+        "feature_distance",
+    ]
+].describe()
 
-# %%
-results_df.groupby("od_id").std(numeric_only=True)
-
-
-# %%
-results_df.groupby("od_id").agg(["min", "max", "mean", "std"])
+route_length_time_summary
 
 
 # %% [markdown]
-# # 11. Route Overlay
+# # 11. Feature Variability
 #
+# This section follows the thesis structure for the feature variability results:
+#
+# 1. Visual example of one OD pair and selected routes.
+# 2. Feature ranges for three example OD pairs.
+# 3. Aggregate feature variability across all OD pairs.
+# 4. Heatmap of feature variability.
+# 5. L1 distance summaries.
+
+
+# %% [markdown]
+# ## Selecting example OD pairs
+
 
 # %%
-def plot_route_overlay(routes):
-    """Plot a collection of routes on one folium map."""
+feature_std_by_od_df = (
+    results_df
+    .groupby("od_id")[FEATURE_COLUMNS]
+    .std()
+    .fillna(0)
+)
+
+mean_feature_std_by_od = (
+    feature_std_by_od_df
+    .mean(axis=1)
+    .sort_values()
+)
+
+MAP_OD_ID = int(mean_feature_std_by_od.idxmax())
+
+MAP_OD_ID
+
+
+# %%
+def select_low_medium_high_od_ids(score_by_od):
+    """Select low-, medium-, and high-variability OD pairs."""
+    sorted_scores = score_by_od.sort_values()
+
+    low_od = int(sorted_scores.index[0])
+    medium_od = int(sorted_scores.index[len(sorted_scores) // 2])
+    high_od = int(sorted_scores.index[-1])
+
+    selected = []
+    for od_id in [low_od, medium_od, high_od]:
+        if od_id not in selected:
+            selected.append(od_id)
+
+    return selected
+
+
+EXAMPLE_OD_IDS = select_low_medium_high_od_ids(mean_feature_std_by_od)
+
+EXAMPLE_OD_IDS
+
+
+# %% [markdown]
+# ## Visualize example routes
+
+# %%
+def get_route_from_records(od_id, sample_id):
+    """Return the stored route geometry for a given OD pair and sample ID."""
+    matches = route_records_df[
+        (route_records_df["od_id"] == od_id)
+        & (route_records_df["sample_id"] == sample_id)
+    ]
+
+    if matches.empty:
+        raise ValueError(f"No route found for od_id={od_id}, sample_id={sample_id}")
+
+    return matches.iloc[0]["route"]
+
+
+def selected_routes_for_map(od_id, top_n=5):
+    """Select baseline plus top-N routes by L1 feature distance for one OD pair."""
+    od_df = results_df[
+        results_df["od_id"] == od_id
+    ]
+
+    baseline_row = od_df[
+        od_df["is_baseline"]
+    ].iloc[0]
+
+    top_rows = (
+        od_df[
+            ~od_df["is_baseline"]
+        ]
+        .sort_values("feature_distance", ascending=False)
+        .head(top_n)
+    )
+
+    selected_rows = pd.concat([
+        baseline_row.to_frame().T,
+        top_rows,
+    ])
+
+    selected_routes = []
+
+    for _, row in selected_rows.iterrows():
+        route = get_route_from_records(
+            od_id=int(row["od_id"]),
+            sample_id=int(row["sample_id"]),
+        )
+
+        selected_routes.append({
+            "label": (
+                "baseline"
+                if row["is_baseline"]
+                else f"sample {int(row['sample_id'])}"
+            ),
+            "feature_distance": row["feature_distance"],
+            "route": route,
+        })
+
+    return selected_routes
+
+
+def plot_route_overlay(selected_routes):
+    """Plot selected routes on one folium map."""
+    first_route_coordinates = route_coordinates(selected_routes[0]["route"])
+
     route_map = folium.Map(
-        location=[48.21, 16.34],
+        location=first_route_coordinates[0],
         zoom_start=13,
     )
 
-    colors = ["blue", "red", "green", "purple", "orange"]
+    colors = ["blue", "red", "green", "purple", "orange", "black"]
 
-    for route_id, route in enumerate(routes):
-        coordinates = route_coordinates(route)
+    for route_id, route_record in enumerate(selected_routes):
+        coordinates = route_coordinates(route_record["route"])
+
+        tooltip = (
+            f"{route_record['label']} "
+            f"(L1={route_record['feature_distance']:.3f})"
+        )
 
         folium.PolyLine(
             coordinates,
             color=colors[route_id % len(colors)],
-            weight=3,
-            opacity=0.7,
+            weight=4 if route_record["label"] == "baseline" else 3,
+            opacity=0.8,
+            tooltip=tooltip,
         ).add_to(route_map)
 
     return route_map
 
 
-plot_route_overlay(all_routes)
+# %%
+map_routes = selected_routes_for_map(
+    od_id=MAP_OD_ID,
+    top_n=5,
+)
+
+plot_route_overlay(map_routes)
 
 
 # %% [markdown]
-# # 12. Summary Statistics
-#
+# ## Feature variability across all OD pairs
 
-# %%
-summary_df = (
-    results_df
-    .groupby("od_id")
-    .agg({
-        "route_length_m": ["min", "max", "mean", "std"],
-        "route_time_min": ["min", "max", "mean", "std"],
-        "feature_distance": ["min", "max", "mean", "std"],
-    })
-)
-
-summary_df
-
-
-# %%
-plt.figure(figsize=(8, 4))
-
-plt.hist(
-    results_df["feature_distance"],
-    bins=30,
-)
-
-plt.xlabel("L1 Feature Distance")
-plt.ylabel("Count")
-plt.title("Distribution of Route Feature Distances")
-plt.show()
-
-
-# %%
-feature_variation = (
-    results_df[FEATURE_COLUMNS]
-    .std()
-    .sort_values(ascending=False)
-)
-
-feature_variation
-
-
-# %%
-plt.figure(figsize=(10, 8))
-
-feature_variation.plot.barh()
-
-plt.xlabel("Standard Deviation")
-plt.title("Global Feature Variability")
-plt.show()
-
-
-# %%
-plt.figure(figsize=(10, 5))
-
-results_df.boxplot(
-    column="route_length_m",
-    by="od_id",
-)
-
-plt.ylabel("Meters")
-plt.title("Route Length Distribution")
-plt.suptitle("")
-plt.show()
-
-
-# %%
-plt.figure(figsize=(10, 5))
-
-results_df.boxplot(
-    column="route_time_min",
-    by="od_id",
-)
-
-plt.ylabel("Milliseconds")
-plt.title("Route Time Distribution")
-plt.suptitle("")
-plt.show()
-
-
-# %%
-if "cycleway:lane" in results_df.columns:
-    plt.figure(figsize=(10, 5))
-
-    results_df.boxplot(
-        column="cycleway:lane",
-        by="od_id",
-    )
-
-    plt.ylabel("Share")
-    plt.title("Cycleway Lane Share Distribution")
-    plt.suptitle("")
-    plt.show()
-
-
-# %%
-feature_variation_matrix = (
-    results_df
-    .groupby("od_id")[FEATURE_COLUMNS]
-    .std()
-)
-
-plt.figure(figsize=(16, 8))
-
-sns.heatmap(
-    feature_variation_matrix,
-    cmap="viridis",
-)
-
-plt.title("Feature Variability Across OD Pairs")
-plt.show()
-
-
-# %%
-diversity_score = (
-    results_df
-    .groupby("od_id")[FEATURE_COLUMNS]
-    .std()
-    .mean(axis=1)
-)
-
-plt.figure(figsize=(8, 4))
-
-diversity_score.sort_values().plot.bar()
-
-plt.ylabel("Mean Feature Std")
-plt.xlabel("OD Pair")
-plt.title("Route Diversity Score per OD Pair")
-plt.show()
-
-
-# %%
-length_stats_df = (
-    results_df
-    .groupby("od_id")["route_length_m"]
-    .agg(["mean", "std"])
-)
-
-length_stats_df["cv"] = (
-    length_stats_df["std"]
-    / length_stats_df["mean"]
-)
-
-length_stats_df["cv"].plot.bar()
-
-plt.ylabel("Coefficient of Variation")
-plt.title("Relative Route Length Variability")
-plt.show()
-
-
-# %% [markdown]
-# # 13. Global Behavior Space
-#
-
-# %%
-global_behavior_space_df = pd.DataFrame({
-    "min": results_df[FEATURE_COLUMNS].min(),
-    "max": results_df[FEATURE_COLUMNS].max(),
-    "mean": results_df[FEATURE_COLUMNS].mean(),
-    "std": results_df[FEATURE_COLUMNS].std(),
-})
-
-global_behavior_space_df["range"] = (
-    global_behavior_space_df["max"]
-    - global_behavior_space_df["min"]
-)
-
-global_behavior_space_df.sort_values(
-    "range",
-    ascending=False,
-)
-
-
-# %%
-global_behavior_space_df["range"]     .sort_values()     .plot.barh(figsize=(10, 8))
-
-plt.xlabel("Reachable Range")
-plt.title("Behavior Space of Route Features")
-plt.show()
-
-
-# %% [markdown]
-# # 14. Clustering
-#
-
-# %%
-X = results_df[FEATURE_COLUMNS].fillna(0)
-
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X)
-
-kmeans = KMeans(
-    n_clusters=N_CLUSTERS,
-    random_state=42,
-)
-
-results_df["cluster"] = kmeans.fit_predict(X_scaled)
-
-results_df["cluster"].value_counts()
-
-
-# %%
-cluster_profiles_df = (
-    results_df
-    .groupby("cluster")[FEATURE_COLUMNS]
-    .mean()
-)
-
-cluster_profiles_df
-
-
-# %%
-pca = PCA(n_components=2)
-X_pca = pca.fit_transform(X_scaled)
-
-plt.figure(figsize=(8, 6))
-
-plt.scatter(
-    X_pca[:, 0],
-    X_pca[:, 1],
-    c=results_df["cluster"],
-)
-
-plt.xlabel("PC1")
-plt.ylabel("PC2")
-plt.title("PCA Projection of Route Feature Space")
-plt.show()
-
-
-# %% [markdown]
-# # 15. Parameter Sensitivity
-#
-
-# %%
-results_df["cycleway_track_bin"] = pd.cut(
-    results_df["cyclewayTrack"],
-    bins=5,
-)
-
-cycleway_track_response = (
-    results_df
-    .groupby("cycleway_track_bin", observed=False)["cycleway:lane"]
-    .mean()
-)
-
-cycleway_track_response.plot(
-    marker="o",
-)
-
-plt.ylabel("Mean cycleway:lane share")
-plt.xlabel("cyclewayTrack bin")
-plt.title("Sensitivity of cycleway:lane to cyclewayTrack")
-plt.show()
-
-
-# %% [markdown]
-# # 16. Behavior Space for One OD Pair
-#
-
-# %%
-example_od_df = results_df[
-    results_df["od_id"] == EXAMPLE_OD
-]
-
-example_base_features = base_feature_vectors[EXAMPLE_OD]
-
-example_behavior_space_df = pd.DataFrame({
-    "min_share": example_od_df[FEATURE_COLUMNS].min(),
-    "max_share": example_od_df[FEATURE_COLUMNS].max(),
-})
-
-example_behavior_space_df["base_share"] = [
-    example_base_features.get(feature, 0)
-    for feature in example_behavior_space_df.index
-]
-
-example_behavior_space_df["range"] = (
-    example_behavior_space_df["max_share"]
-    - example_behavior_space_df["min_share"]
-)
-
-example_behavior_space_df = (
-    example_behavior_space_df
-    .sort_values("range", ascending=False)
-)
-
-example_behavior_space_df
-
-
-# %%
-top_example_features = example_behavior_space_df.head(15)
-
-plt.figure(figsize=(10, 8))
-
-plt.hlines(
-    y=top_example_features.index,
-    xmin=top_example_features["min_share"],
-    xmax=top_example_features["max_share"],
-)
-
-plt.scatter(
-    top_example_features["base_share"],
-    top_example_features.index,
-    marker="o",
-)
-
-plt.xlabel("Feature Share")
-plt.title(f"Reachable Behavior Space (OD {EXAMPLE_OD})")
-plt.show()
-
-
-# %% [markdown]
-# # 17. Behavior Space for All OD Pairs
-#
 
 # %%
 behavior_rows = []
 
 for od_id in sorted(results_df["od_id"].unique()):
-    od_df = results_df[results_df["od_id"] == od_id]
+    od_df = results_df[
+        results_df["od_id"] == od_id
+    ]
+
     base_features = base_feature_vectors[od_id]
 
     od_behavior_space_df = pd.DataFrame({
         "min_share": od_df[FEATURE_COLUMNS].min(),
-        
+        "mean_share": od_df[FEATURE_COLUMNS].mean(),
         "max_share": od_df[FEATURE_COLUMNS].max(),
     })
 
@@ -926,37 +825,321 @@ for od_id in sorted(results_df["od_id"].unique()):
         - od_behavior_space_df["min_share"]
     )
 
+    od_behavior_space_df["mean_delta_to_base"] = (
+        od_behavior_space_df["mean_share"]
+        - od_behavior_space_df["base_share"]
+    )
+
+    mean_abs_delta_to_base = {}
+
+    for feature in FEATURE_COLUMNS:
+        base_value = base_features.get(feature, 0)
+        mean_abs_delta_to_base[feature] = (
+            od_df[feature]
+            .sub(base_value)
+            .abs()
+            .mean()
+        )
+
+    od_behavior_space_df["mean_abs_delta_to_base"] = (
+        pd.Series(mean_abs_delta_to_base)
+    )
+
     od_behavior_space_df["od_id"] = od_id
     od_behavior_space_df["feature"] = od_behavior_space_df.index
 
-    behavior_rows.append(od_behavior_space_df.reset_index(drop=True))
+    behavior_rows.append(
+        od_behavior_space_df.reset_index(drop=True)
+    )
 
 
 behavior_by_od_df = pd.concat(
     behavior_rows,
-    ignore_index=True
+    ignore_index=True,
 )
-
 
 behavior_summary_df = (
     behavior_by_od_df
     .groupby("feature")
     .agg({
         "min_share": "mean",
-        "max_share": "mean",
         "base_share": "mean",
+        "mean_share": "mean",
+        "max_share": "mean",
         "range": "mean",
+        "mean_delta_to_base": "mean",
+        "mean_abs_delta_to_base": "mean",
     })
     .rename(columns={
         "min_share": "mean_min_share",
-        "max_share": "mean_max_share",
         "base_share": "mean_base_share",
+        "mean_share": "mean_mean_share",
+        "max_share": "mean_max_share",
         "range": "mean_range",
+        "mean_delta_to_base": "mean_delta_to_base",
+        "mean_abs_delta_to_base": "mean_abs_delta_to_base",
     })
     .sort_values("mean_range", ascending=False)
 )
 
 behavior_summary_df
+
+# todo no mean_mean_share
+
+
+# %%
+# Compact thesis table candidate.
+behavior_summary_df[
+    [
+        "mean_min_share",
+        "mean_base_share",
+        "mean_mean_share",
+        "mean_max_share",
+        "mean_range",
+        "mean_delta_to_base",
+        "mean_abs_delta_to_base",
+    ]
+].head(25)
+
+
+# %%
+plt.figure(figsize=(10, 8))
+
+behavior_summary_df["mean_range"].sort_values().plot.barh()
+
+plt.xlabel("Mean Reachable Range")
+plt.title("Aggregate Feature Variability Across OD Pairs")
+plt.show()
+
+
+# %%
+plt.figure(figsize=(10, 8))
+
+behavior_summary_df["mean_abs_delta_to_base"].sort_values().plot.barh()
+
+plt.xlabel("Mean Absolute Delta to Baseline")
+plt.title("Mean Feature Deviation from Baseline")
+plt.show()
+
+
+# %% [markdown]
+# ## Heatmap
+
+
+# %%
+feature_range_matrix = (
+    behavior_by_od_df
+    .pivot(
+        index="od_id",
+        columns="feature",
+        values="range",
+    )
+    .fillna(0)
+)
+
+# Reorder columns by global mean range.
+feature_range_matrix = feature_range_matrix[
+    behavior_summary_df.index
+]
+
+plt.figure(figsize=(16, 8))
+
+sns.heatmap(
+    feature_range_matrix,
+    cmap="viridis",
+)
+
+plt.xlabel("Feature")
+plt.ylabel("OD Pair")
+plt.title("Feature Variability Across OD Pairs")
+plt.show()
+
+
+# %% [markdown]
+# ## Feature Ranges for example OD pairs
+
+# %%
+def behavior_space_for_od(od_id):
+    """Compute min, mean, max, baseline, and range per feature for one OD pair."""
+    od_df = results_df[
+        results_df["od_id"] == od_id
+        ]
+
+    base_features = base_feature_vectors[od_id]
+
+    behavior_space_df = pd.DataFrame({
+        "min_share": od_df[FEATURE_COLUMNS].min(),
+        "mean_share": od_df[FEATURE_COLUMNS].mean(),
+        "max_share": od_df[FEATURE_COLUMNS].max(),
+    })
+
+    behavior_space_df["base_share"] = [
+        base_features.get(feature, 0)
+        for feature in behavior_space_df.index
+    ]
+
+    behavior_space_df["range"] = (
+            behavior_space_df["max_share"]
+            - behavior_space_df["min_share"]
+    )
+
+    behavior_space_df = (
+        behavior_space_df
+        .sort_values("range", ascending=False)
+    )
+
+    return behavior_space_df
+
+
+def plot_behavior_space_dots(od_id, top_n=15):
+    """Plot sampled feature values with baseline marker for one OD pair."""
+    behavior_space_df = behavior_space_for_od(od_id)
+    top_features = behavior_space_df.head(top_n).index.tolist()
+
+    od_samples_df = results_df[results_df["od_id"] == od_id]
+
+    plt.figure(figsize=(10, 8))
+
+    for y_pos, feature in enumerate(top_features):
+        sample_values = od_samples_df[feature].dropna()
+
+        # background range
+        plt.hlines(
+            y=y_pos,
+            xmin=sample_values.min(),
+            xmax=sample_values.max(),
+            alpha=0.2,
+            linewidth=4,
+            zorder=1,
+        )
+
+        # sampled routes
+        plt.scatter(
+            sample_values,
+            np.full(len(sample_values), y_pos),
+            alpha=0.5,
+            s=20,
+            zorder=2,
+            label="Sample Routes" if y_pos == 0 else None,
+        )
+
+        # baseline
+        plt.scatter(
+            behavior_space_df.loc[feature, "base_share"],
+            y_pos,
+            s=60,
+            edgecolor="black",
+            linewidth=1.5,
+            zorder=3,
+            label="Baseline Route" if y_pos == 0 else None,
+        )
+
+    plt.yticks(range(len(top_features)), top_features)
+    plt.xlabel("Feature Share")
+    plt.title(f"Reachable Behavior Space Distribution (OD {od_id})")
+    plt.legend()
+    plt.show()
+
+    return behavior_space_df
+
+
+# %%
+example_behavior_spaces = {}
+
+for od_id in EXAMPLE_OD_IDS:
+    example_behavior_spaces[od_id] = plot_behavior_space_dots(
+        od_id=od_id,
+        top_n=50,
+    )
+
+# todo decide on feature order, make consist across plots
+# maybe dont show lines but instead points for every sample route
+
+
+# %%
+# Optional: inspect the table behind one example plot.
+example_behavior_spaces[EXAMPLE_OD_IDS[-1]].head(20)
+
+
+# %% [markdown]
+# ## L1 Distance to Baseline
+#
+# The current `feature_distance` column stores the L1 distance between each
+# sampled route feature vector and the baseline feature vector of the same
+# OD pair. At this stage, the existing feature distance is used as computed
+# during experiment execution.
+#
+# TODO: Replace or recompute this with normalized feature vectors once the
+# final normalization strategy for L1 distance is fixed.
+
+# %%
+results_df["feature_distance"].describe()
+
+
+# %%
+l1_summary_by_od_df = (
+    results_df
+    .groupby("od_id")["feature_distance"]
+    .agg(["min", "max", "mean", "std"])
+    .sort_values("mean", ascending=False)
+)
+
+l1_summary_by_od_df
+
+
+# %%
+plt.figure(figsize=(8, 4))
+
+plt.hist(
+    results_df["feature_distance"],
+    bins=30,
+)
+
+plt.xlabel("L1 Feature Distance to Baseline")
+plt.ylabel("Count")
+plt.title("Distribution of Route Feature Distances to Baseline")
+plt.show()
+
+
+# %%
+plt.figure(figsize=(10, 5))
+
+l1_summary_by_od_df["mean"].sort_values().plot.bar()
+
+plt.ylabel("Mean L1 Feature Distance to Baseline")
+plt.xlabel("OD Pair")
+plt.title("Mean Route Feature Distance to Baseline per OD Pair")
+plt.show()
+
+
+# %%
+plt.figure(figsize=(10, 5))
+
+l1_summary_by_od_df["max"].sort_values().plot.bar()
+
+plt.ylabel("Maximum L1 Feature Distance to Baseline")
+plt.xlabel("OD Pair")
+plt.title("Maximum Route Feature Distance to Baseline per OD Pair")
+plt.show()
+
+
+# %% [markdown]
+# ## Route length and time variability
+
+
+# %%
+route_metric_summary_df = (
+    results_df
+    .groupby("od_id")
+    .agg({
+        "route_length_m": ["min", "max", "mean", "std"],
+        "route_time_min": ["min", "max", "mean", "std"],
+        "route_ascend_m": ["min", "max", "mean", "std"],
+        "route_descend_m": ["min", "max", "mean", "std"],
+    })
+)
+
+route_metric_summary_df
 
 
 # %% [markdown]
