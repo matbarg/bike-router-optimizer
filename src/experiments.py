@@ -13,11 +13,12 @@
 #     name: python3
 # ---
 
-# %% [markdown] jp-MarkdownHeadingCollapsed=true
+# %% [markdown]
 # # 1. Imports
 
 # %%
 import random
+from pathlib import Path
 
 import folium
 import geopandas as gpd
@@ -31,14 +32,14 @@ from IPython.display import HTML, display
 from geopy.distance import geodesic
 from shapely.geometry import Point
 
-# %% [markdown] jp-MarkdownHeadingCollapsed=true
+# %% [markdown]
 # # 2. Configuration
 
 # %%
 RANDOM_SEED = 42
 
-OD_PAIRS_COUNT = 20
-ROUTES_PER_OD = 300
+OD_PAIRS_COUNT = 10
+ROUTES_PER_OD = 50
 
 THETA_MIN = 0.2
 THETA_MAX = 2.0
@@ -77,14 +78,102 @@ OD_DISTANCE_GROUPS = [
     },
 ]
 
+# %% [markdown]
+# ## 2.1 Export Configuration
+
+# %%
+EXPORT_DIR = Path("thesis_exports")
+EXPORT_DIR.mkdir(exist_ok=True)
+
+PLOTS_DIR = EXPORT_DIR / "plots"
+MAPS_DIR = EXPORT_DIR / "maps"
+TABLES_DIR = EXPORT_DIR / "tables"
+
+PLOTS_DIR.mkdir(exist_ok=True)
+MAPS_DIR.mkdir(exist_ok=True)
+TABLES_DIR.mkdir(exist_ok=True)
+
+ENABLE_EXPORTS = True
+
+def export_plot(fig, filename, pdf=True):
+    """Export a matplotlib figure to PDF."""
+    if not ENABLE_EXPORTS:
+        return
+    
+    plot_path = PLOTS_DIR / f"{filename}.pdf"
+    fig.savefig(plot_path, format="pdf", bbox_inches="tight", dpi=300)
+    print(f"Exported plot: {plot_path}")
+
+def export_map(folium_map, filename):
+    """Export a folium map to PNG using Selenium."""
+    if not ENABLE_EXPORTS:
+        return
+    
+    import tempfile
+    import time
+    
+    html_path = MAPS_DIR / f"{filename}_temp.html"
+    png_path = MAPS_DIR / f"{filename}.png"
+    
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.chrome.service import Service
+        from selenium.webdriver.chrome.options import Options
+        from webdriver_manager.chrome import ChromeDriverManager
+        
+        folium_map.save(str(html_path))
+        
+        chrome_options = Options()
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--window-size=1920,1080")
+        
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        
+        driver.get(f"file://{html_path.absolute()}")
+        time.sleep(3)
+        
+        driver.save_screenshot(str(png_path))
+        driver.quit()
+        
+        html_path.unlink()
+        print(f"Exported map (PNG): {png_path}")
+        
+    except ImportError as e:
+        print(f"Selenium/webdriver-manager not installed: {e}")
+        print(f"Install with: pip install selenium webdriver-manager")
+        html_path.unlink()
+    except Exception as e:
+        print(f"Error exporting map to PNG: {e}")
+        html_path.unlink()
+
+def export_table(df, table_name, include_csv=True, include_latex=True):
+    """Export a DataFrame to CSV and LaTeX formats."""
+    if not ENABLE_EXPORTS:
+        return
+    
+    if include_csv:
+        csv_path = TABLES_DIR / f"{table_name}.csv"
+        df.to_csv(csv_path, index=False)
+        print(f"Exported table (CSV): {csv_path}")
+    
+    if include_latex:
+        latex_path = TABLES_DIR / f"{table_name}.tex"
+        with open(latex_path, "w") as f:
+            f.write(df.to_latex(index=False))
+        print(f"Exported table (LaTeX): {latex_path}")
+
 # %%
 random.seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
 
-# %% [markdown] jp-MarkdownHeadingCollapsed=true
+# %% [markdown]
 # # 3. Defining the Trips
 
-# %% [markdown] jp-MarkdownHeadingCollapsed=true
+# %% [markdown]
 # ## 3.1 Loading the Map Boundaries
 
 # %%
@@ -113,8 +202,8 @@ folium.GeoJson(vienna.geometry.to_json()).add_to(vienna_map)
 
 vienna_map
 
-
-# %% [markdown] jp-MarkdownHeadingCollapsed=true
+# %%
+export_map(vienna_map, "01_vienna_boundaries")
 # ## 3.2 Trip Sampling
 
 # %% jupyter={"source_hidden": true}
@@ -262,6 +351,9 @@ od_pairs_df = pd.DataFrame([
 
 od_pairs_df
 
+# %%
+export_table(od_pairs_df, "02_od_pairs")
+
 
 # %%
 od_distance_summary_df = (
@@ -278,6 +370,9 @@ od_distance_summary_df["share"] = (
 )
 
 od_distance_summary_df
+
+# %%
+export_table(od_distance_summary_df, "03_od_distance_summary")
 
 
 # %% [markdown] jp-MarkdownHeadingCollapsed=true
@@ -363,14 +458,17 @@ for od_id, od_pair in enumerate(od_pairs):
 
 od_map
 
+# %%
+export_map(od_map, "04_od_pairs_map")
 
-# %% [markdown] jp-MarkdownHeadingCollapsed=true
+
+# %% [markdown]
 # # 4. Experiment Execution
 #
 # For each OD pair, first the baseline route is requested.
 # Then one route is requested for each sampled theta vector.
 
-# %% [markdown] jp-MarkdownHeadingCollapsed=true
+# %% [markdown]
 # ## 4.1 Routing Parameters and Theta Sampling
 
 # %%
@@ -453,7 +551,7 @@ theta_samples_df = generate_theta_samples(ROUTES_PER_OD)
 theta_samples_df.head()
 
 
-# %% [markdown] jp-MarkdownHeadingCollapsed=true
+# %% [markdown]
 # ## 4.2 Helpers
 
 # %%
@@ -504,7 +602,7 @@ def route_coordinates(route):
     ]
 
 
-# %% [markdown] jp-MarkdownHeadingCollapsed=true
+# %% [markdown]
 # ## 4.3 API Request
 
 # %%
@@ -625,7 +723,7 @@ for od_id, od_pair in enumerate(od_pairs):
     except Exception as error:
         print(f"Failed OD {od_id}: {error}")
 
-# %% [markdown] jp-MarkdownHeadingCollapsed=true
+# %% [markdown]
 # # 5. Result Tables
 
 # %%
@@ -650,6 +748,9 @@ dataset_overview = pd.Series({
 
 dataset_overview
 
+# %%
+export_table(dataset_overview.reset_index().rename(columns={0: "value", "index": "metric"}), "05_dataset_overview")
+
 
 # %% [markdown]
 # # 6. Evaluations
@@ -657,7 +758,7 @@ dataset_overview
 # %% [markdown]
 # ## 6.1 Functions
 
-# %% [markdown]
+# %% [markdown] jp-MarkdownHeadingCollapsed=true
 # ### 6.1.1 Trip Summary
 #
 # This section summarizes all generated routes for one OD pair.
@@ -1041,6 +1142,7 @@ def plot_od_feature_ranges(features_df, routes_df, od_id, top_n=20):
     ax.legend(loc="lower right")
 
     plt.tight_layout()
+    export_plot(fig, f"plot_od_feature_ranges_od{od_id}")
     plt.show()
 
     return summary_df
@@ -1051,22 +1153,22 @@ def show_od_summary(od_id, top_n=20):
     display(HTML(f"<h3>OD {od_id}</h3>"))
 
     display(HTML("<h4>Route metric summary</h4>"))
-    display(
-        od_metric_summary(
-            routes_df=routes_df,
-            od_id=od_id,
-        ).round(2)
-    )
+    metric_table = od_metric_summary(
+        routes_df=routes_df,
+        od_id=od_id,
+    ).round(2)
+    export_table(metric_table, f"summary_od{od_id}_metrics")
+    display(metric_table)
 
     display(HTML("<h4>Most variable route features</h4>"))
-    display(
-        od_feature_variability_summary(
-            features_df=features_df,
-            routes_df=routes_df,
-            od_id=od_id,
-            top_n=top_n,
-        ).round(3)
-    )
+    feature_table = od_feature_variability_summary(
+        features_df=features_df,
+        routes_df=routes_df,
+        od_id=od_id,
+        top_n=top_n,
+    ).round(3)
+    export_table(feature_table, f"summary_od{od_id}_feature_variability")
+    display(feature_table)
 
     display(HTML("<h4>Route feature ranges plot</h4>"))
     display(
@@ -1079,12 +1181,12 @@ def show_od_summary(od_id, top_n=20):
     )
 
     display(HTML("<h4>All generated routes</h4>"))
-    display(
-        plot_all_routes_for_od(
-            route_records_df=route_records_df,
-            od_id=od_id,
-        )
+    route_map = plot_all_routes_for_od(
+        route_records_df=route_records_df,
+        od_id=od_id,
     )
+    export_map(route_map, f"summary_od{od_id}_all_routes")
+    display(route_map)
 
 #show_od_summary(
 #    od_id=16,
@@ -1092,7 +1194,7 @@ def show_od_summary(od_id, top_n=20):
 #)
 
 
-# %% [markdown]
+# %% [markdown] jp-MarkdownHeadingCollapsed=true
 # ### 6.1.2 Single Route Summary
 #
 # This section shows one generated route.
@@ -1365,6 +1467,7 @@ def plot_single_route_features(features_df, od_id, sample_id, inside_label_min_s
     )
 
     plt.tight_layout()
+    export_plot(fig, f"plot_single_route_features_od{od_id}_sample{sample_id}")
     plt.show()
 
     return plot_source_df
@@ -1375,13 +1478,13 @@ def show_route_summary(od_id, sample_id):
     display(HTML(f"<h3>OD {od_id} Route {sample_id}</h3>"))
 
     display(HTML("<h4>Route metrics</h4>"))
-    display(
-        single_route_metric_table(
-            routes_df=routes_df,
-            od_id=od_id,
-            sample_id=sample_id,
-        ).round(2)
-    )
+    metric_table = single_route_metric_table(
+        routes_df=routes_df,
+        od_id=od_id,
+        sample_id=sample_id,
+    ).round(2)
+    export_table(metric_table, f"route_od{od_id}_sample{sample_id}_metrics")
+    display(metric_table)
 
     display(HTML("<h4>Route features</h4>"))
     plot_single_route_features(
@@ -1392,14 +1495,14 @@ def show_route_summary(od_id, sample_id):
     )
 
     display(HTML("<h4>Route map</h4>"))
-    display(
-        plot_all_routes_for_od(
-            route_records_df=route_records_df,
-            od_id=od_id,
-            highlight_sample_ids=[sample_id],
-            show_baseline=True,
-        )
+    route_map = plot_all_routes_for_od(
+        route_records_df=route_records_df,
+        od_id=od_id,
+        highlight_sample_ids=[sample_id],
+        show_baseline=True,
     )
+    export_map(route_map, f"route_od{od_id}_sample{sample_id}")
+    display(route_map)
 
 
 # %%
@@ -1467,7 +1570,7 @@ def select_route_by_feature_share(
 # %% [markdown]
 # ## 6.2 Route Data Evaluation
 
-# %% [markdown] jp-MarkdownHeadingCollapsed=true
+# %% [markdown]
 # ### 6.2.1 Mean Feature Ranges across Trips
 
 # %% jupyter={"source_hidden": true}
@@ -1551,7 +1654,7 @@ feature_variability_summary_df, feature_variability_od_df = feature_variability_
 feature_variability_summary_df.head(50).round(3)
 
 
-# %% [markdown] jp-MarkdownHeadingCollapsed=true
+# %% [markdown]
 # ### 6.2.2 Trips Ranked by Overall Mean Feture Range
 
 # %% jupyter={"source_hidden": true}
@@ -1626,6 +1729,9 @@ od_range_ranking_df = od_variability_ranking_by_feature_ranges(
 
 od_range_ranking_df.round(3)
 
+# %%
+export_table(od_range_ranking_df, "06_od_variability_ranking")
+
 # %% [markdown]
 # ### 6.2.3 Visualization of Selected Trips
 
@@ -1656,6 +1762,18 @@ selected_ods_df[
         "max_feature_range",
     ]
 ].round(3)
+
+# %%
+export_table(selected_ods_df[
+    [
+        "selection_group",
+        "rank",
+        "od_id",
+        "mean_feature_range",
+        "median_feature_range",
+        "max_feature_range",
+    ]
+], "07_selected_ods_summary")
 
 selected_od_ids = selected_ods_df["od_id"].tolist()
 
@@ -1912,6 +2030,8 @@ def evaluate_persona(persona_df, persona_name, positive_features, negative_featu
         }
     )
 
+    export_table(best_score_per_od_table, f"persona_{persona_name}_best_routes")
+
     display(
         best_score_per_od_table.style.format({
             "route_time": "{:.2f}",
@@ -1932,6 +2052,8 @@ def evaluate_persona(persona_df, persona_name, positive_features, negative_featu
         .T
         .sort_values("mean", ascending=False)
     )
+
+    export_table(best_parameter_summary_df.reset_index().rename(columns={"index": "parameter"}), f"persona_{persona_name}_parameter_summary")
 
     display(best_parameter_summary_df.round(3))
 
@@ -2019,6 +2141,8 @@ def evaluate_persona_time_adjusted(
         }
     )
 
+    export_table(best_score_per_od_table, f"persona_{persona_name}_time_adjusted_best_routes")
+
     display(
         best_score_per_od_table.style.format({
             "route_time": "{:.2f}",
@@ -2039,6 +2163,8 @@ def evaluate_persona_time_adjusted(
         .T
         .sort_values("mean", ascending=False)
     )
+
+    export_table(best_parameter_summary_df.reset_index().rename(columns={"index": "parameter"}), f"persona_{persona_name}_time_adjusted_parameter_summary")
 
     display(best_parameter_summary_df.round(3))
 
