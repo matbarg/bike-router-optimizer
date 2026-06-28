@@ -14,5 +14,6 @@ dependencies = [
     "geopy",
     "shapely",
     "scikit-learn",
-    "jupytext"
+    "jupytext",
+    "ipywidgets"
 ]
