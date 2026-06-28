@@ -40,9 +40,6 @@ RANDOM_SEED = 42
 OD_PAIRS_COUNT = 20
 ROUTES_PER_OD = 200
 
-OD_MIN_DISTANCE_KM = 2
-OD_MAX_DISTANCE_KM = 10
-
 THETA_MIN = 0.2
 THETA_MAX = 2.0
 
@@ -52,6 +49,37 @@ API_URL = "http://localhost:8080/api/route"
 
 EXAMPLE_OD_ID = 10
 EXAMPLE_SAMPLE_ID = BASE_SAMPLE_ID
+
+OD_DISTANCE_GROUPS = [
+    {
+        "label": "1-3km",
+        "min_km": 1,
+        "max_km": 3,
+        "share": 0.15,
+    },
+    {
+        "label": "3-5km",
+        "min_km": 3,
+        "max_km": 5,
+        "share": 0.20,
+    },
+    {
+        "label": "5-10km",
+        "min_km": 5,
+        "max_km": 10,
+        "share": 0.40,
+    },
+    {
+        "label": ">10km",
+        "min_km": 10,
+        "max_km": 15,
+        "share": 0.25,
+    },
+]
+
+# %%
+random.seed(RANDOM_SEED)
+np.random.seed(RANDOM_SEED)
 
 # %%
 random.seed(RANDOM_SEED)
@@ -105,46 +133,105 @@ def sample_point_in_polygon(polygon):
             return point
 
 
-def sample_od_pair(
-        polygon,
-        min_distance_km=OD_MIN_DISTANCE_KM,
-        max_distance_km=OD_MAX_DISTANCE_KM,
+def distance_group_counts(distance_groups, total_count):
+    """Convert distance group shares into integer OD pair counts."""
+    groups_with_counts = []
+
+    for group in distance_groups:
+        exact_count = group["share"] * total_count
+        count = int(np.floor(exact_count))
+
+        groups_with_counts.append({
+            **group,
+            "exact_count": exact_count,
+            "count": count,
+            "remainder": exact_count - count,
+        })
+
+    assigned_count = sum(
+        group["count"]
+        for group in groups_with_counts
+    )
+
+    remaining_count = total_count - assigned_count
+
+    groups_with_counts = sorted(
+        groups_with_counts,
+        key=lambda group: group["remainder"],
+        reverse=True,
+    )
+
+    for i in range(remaining_count):
+        groups_with_counts[i]["count"] += 1
+
+    return groups_with_counts
+
+
+def sample_od_pair_for_distance_group(
+    polygon,
+    distance_group,
+    max_attempts=1000,
 ):
-    """Sample one origin-destination pair fully contained in the polygon."""
-    origin_point = sample_point_in_polygon(polygon)
+    """Sample one origin-destination pair within a fixed distance group."""
+    for _ in range(max_attempts):
+        origin_point = sample_point_in_polygon(polygon)
 
-    origin_lat = origin_point.y
-    origin_lon = origin_point.x
+        origin_lat = origin_point.y
+        origin_lon = origin_point.x
 
-    distance_km = random.uniform(min_distance_km, max_distance_km)
-    bearing = random.uniform(0, 360)
+        distance_km = random.uniform(
+            distance_group["min_km"],
+            distance_group["max_km"],
+        )
 
-    destination = geodesic(kilometers=distance_km).destination(
-        (origin_lat, origin_lon),
-        bearing,
+        bearing = random.uniform(0, 360)
+
+        destination = geodesic(kilometers=distance_km).destination(
+            (origin_lat, origin_lon),
+            bearing,
+        )
+
+        destination_point = Point(
+            destination.longitude,
+            destination.latitude,
+        )
+
+        if polygon.contains(destination_point):
+            return {
+                "origin_point": origin_point,
+                "destination_point": destination_point,
+                "distance_group": distance_group["label"],
+                "sampled_distance_km": distance_km,
+            }
+
+    raise ValueError(
+        f"Could not sample OD pair for distance group {distance_group['label']}"
     )
 
-    destination_point = Point(
-        destination.longitude,
-        destination.latitude,
-    )
 
-    if polygon.contains(destination_point):
-        return origin_point, destination_point
-
-    return sample_od_pair(
-        polygon=polygon,
-        min_distance_km=min_distance_km,
-        max_distance_km=max_distance_km,
-    )
-
-
-def generate_od_pairs(polygon, count):
-    """Generate origin-destination pairs."""
+def generate_od_pairs_stratified(
+    polygon,
+    count,
+    distance_groups,
+):
+    """Generate OD pairs with exact counts per distance group."""
     od_pairs = []
 
-    while len(od_pairs) < count:
-        od_pairs.append(sample_od_pair(polygon))
+    groups_with_counts = distance_group_counts(
+        distance_groups=distance_groups,
+        total_count=count,
+    )
+
+    for group in groups_with_counts:
+        for _ in range(group["count"]):
+            od_pair = sample_od_pair_for_distance_group(
+                polygon=polygon,
+                distance_group=group,
+            )
+
+            od_pairs.append(od_pair)
+
+    random.shuffle(od_pairs)
 
     return od_pairs
 
@@ -155,12 +242,44 @@ def point_to_lat_lon(point):
 
 
 # %%
-od_pairs = generate_od_pairs(
+od_pairs = generate_od_pairs_stratified(
     polygon=vienna_polygon,
     count=OD_PAIRS_COUNT,
+    distance_groups=OD_DISTANCE_GROUPS,
 )
 
 len(od_pairs)
+
+
+# %%
+od_pairs_df = pd.DataFrame([
+    {
+        "od_id": od_id,
+        "distance_group": od_pair["distance_group"],
+        "sampled_distance_km": od_pair["sampled_distance_km"],
+    }
+    for od_id, od_pair in enumerate(od_pairs)
+])
+
+od_pairs_df
+
+
+# %%
+od_distance_summary_df = (
+    od_pairs_df["distance_group"]
+    .value_counts()
+    .rename("count")
+    .reset_index()
+    .rename(columns={"index": "distance_group"})
+)
+
+od_distance_summary_df["share"] = (
+    od_distance_summary_df["count"]
+    / len(od_pairs_df)
+)
+
+od_distance_summary_df
+
 
 # %% [markdown]
 # ## OD Pair Map
@@ -173,7 +292,10 @@ od_map = folium.Map(
 
 folium.GeoJson(vienna.geometry.to_json()).add_to(od_map)
 
-for od_id, (origin_point, destination_point) in enumerate(od_pairs):
+for od_id, od_pair in enumerate(od_pairs):
+    origin_point = od_pair["origin_point"]
+    destination_point = od_pair["destination_point"]
+
     origin_location = [origin_point.y, origin_point.x]
     destination_location = [destination_point.y, destination_point.x]
 
@@ -182,13 +304,19 @@ for od_id, (origin_point, destination_point) in enumerate(od_pairs):
         (origin_point.x + destination_point.x) / 2,
     ]
 
+    popup_text = (
+        f"OD {od_id}<br>"
+        f"distance group: {od_pair['distance_group']}<br>"
+        f"sampled distance: {od_pair['sampled_distance_km']:.2f} km"
+    )
+
     folium.CircleMarker(
         location=origin_location,
         radius=3,
         color="green",
         fill=True,
         fill_opacity=0.8,
-        popup=f"origin {od_id}",
+        popup=f"origin {od_id}<br>{popup_text}",
     ).add_to(od_map)
 
     folium.CircleMarker(
@@ -197,7 +325,7 @@ for od_id, (origin_point, destination_point) in enumerate(od_pairs):
         color="red",
         fill=True,
         fill_opacity=0.8,
-        popup=f"destination {od_id}",
+        popup=f"destination {od_id}<br>{popup_text}",
     ).add_to(od_map)
 
     folium.PolyLine(
@@ -208,15 +336,18 @@ for od_id, (origin_point, destination_point) in enumerate(od_pairs):
         color="blue",
         weight=2,
         opacity=0.5,
+        tooltip=popup_text,
     ).add_to(od_map)
 
     folium.Marker(
         location=midpoint_location,
         icon=folium.DivIcon(
-            icon_size=(25, 22),
-            icon_anchor=(20, 11),
+            icon_size=(34, 22),
+            icon_anchor=(17, 11),
             html=f"""
             <div style="
+                width: 30px;
+                height: 20px;
                 line-height: 20px;
                 font-size: 11px;
                 font-weight: bold;
@@ -237,7 +368,7 @@ od_map
 # %% [markdown]
 # # 5. Routing Parameters and Theta Sampling
 
-# %%
+# %% jupyter={"source_hidden": true}
 def route_params(
         cycleway_lane=1.0,
         cycleway_track=1.0,
@@ -277,7 +408,7 @@ BASE_THETA = route_params()
 PARAMETER_COLUMNS = list(BASE_THETA.keys())
 
 
-# %%
+# %% jupyter={"source_hidden": true}
 def sample_theta(theta_min=THETA_MIN, theta_max=THETA_MAX):
     """Sample one random routing preference vector."""
     return route_params(
@@ -322,7 +453,7 @@ theta_samples_df.head()
 # %% [markdown]
 # # 6. Routing API
 
-# %%
+# %% jupyter={"source_hidden": true}
 def get_route(origin, destination, theta):
     """Request one route from the routing API."""
     payload = {
@@ -355,7 +486,7 @@ def get_route(origin, destination, theta):
 # %% [markdown]
 # # 7. Route Extraction Helpers
 
-# %%
+# %% jupyter={"source_hidden": true}
 def route_metric_row(route, od_id, sample_id, is_baseline, theta):
     """Create one row for route-level metrics."""
     properties = route["properties"]
@@ -414,9 +545,9 @@ route_rows = []
 feature_rows = []
 route_records = []
 
-for od_id, (origin_point, destination_point) in enumerate(od_pairs):
-    origin = point_to_lat_lon(origin_point)
-    destination = point_to_lat_lon(destination_point)
+for od_id, od_pair in enumerate(od_pairs):
+    origin = point_to_lat_lon(od_pair["origin_point"])
+    destination = point_to_lat_lon(od_pair["destination_point"])
 
     try:
         base_route = get_route(
@@ -1325,7 +1456,7 @@ show_route_summary(
 #
 # ## 12.1 Route Metric Variability Across OD Pairs
 
-# %%
+# %% jupyter={"source_hidden": true}
 def metric_variability_across_ods(routes_df):
     """Summarize relative route metric variability across all OD pairs.
 
@@ -1401,7 +1532,7 @@ metric_variability_summary_df.round(3)
 # %% [markdown]
 # ## 12.2 Feature Variability Across OD Pairs
 
-# %%
+# %% jupyter={"source_hidden": true}
 def feature_variability_across_ods(features_df, routes_df):
     """Summarize feature variability across all OD pairs.
 
@@ -1485,7 +1616,7 @@ feature_variability_summary_df.head(20).round(3)
 # %% [markdown]
 # ## 12.3 Distribution of Feature Ranges Across OD Pairs
 
-# %%
+# %% jupyter={"source_hidden": true}
 def plot_feature_range_distribution_across_ods(feature_variability_od_df, top_n=10):
     """Plot distribution of feature ranges over OD pairs.
 
@@ -1590,7 +1721,7 @@ plot_feature_range_distribution_across_ods(
 )
 
 
-# %%
+# %% jupyter={"source_hidden": true}
 def od_variability_ranking_by_feature_ranges(features_df, routes_df):
     """Rank OD pairs by their overall feature variability.
 
@@ -1666,7 +1797,7 @@ od_range_ranking_df.round(3)
 # %% [markdown]
 # ## Feature co-variation and parameter correlation
 
-# %%
+# %% jupyter={"source_hidden": true}
 def build_route_feature_matrix(features_df, routes_df, include_baseline=False):
     """Create one row per route with feature shares as columns.
 
@@ -1722,7 +1853,7 @@ route_feature_matrix_df, feature_columns = build_route_feature_matrix(
 )
 
 
-# %%
+# %% jupyter={"source_hidden": true}
 def parameter_feature_sensitivity(
         route_feature_matrix_df,
         feature_columns,
@@ -1782,7 +1913,7 @@ parameter_feature_sensitivity_df.round(3)
 #
 # ## 13.1 Helpers
 
-# %%
+# %% jupyter={"source_hidden": true}
 def min_max_normalize_by_od(df, column):
     """Min-max normalize one column within each OD pair."""
     min_values = df.groupby("od_id")[column].transform("min")
@@ -1917,7 +2048,7 @@ persona_df, persona_feature_columns = build_route_feature_matrix(
 persona_df
 
 
-# %%
+# %% jupyter={"source_hidden": true}
 def evaluate_persona(persona_df, persona_name, positive_features, negative_features):
     scored_df = compute_persona_scores(
         df=persona_df,
@@ -2066,8 +2197,8 @@ evaluate_persona(
 
 # %%
 show_route_summary(
-    od_id=1,
-    sample_id=176
+    od_id=12,
+    sample_id=55
 )
 
 
